@@ -422,7 +422,7 @@ export default function Home() {
       errs.prevWage = "0以上の数値を入力してください";
     if (form.currWage === "" || isNaN(cv) || cv < 0)
       errs.currWage = "0以上の数値を入力してください";
-    if (form.currentStandardAmount === "" || isNaN(sa) || sa < 0)
+    if (form.currentStandardAmount !== "" && (isNaN(sa) || sa < 0))
       errs.currentStandardAmount = "0以上の数値を入力してください";
     if (form.acquisitionCost === "" || isNaN(ac) || ac <= 0)
       errs.acquisitionCost = "0より大きい数値を入力してください";
@@ -434,10 +434,11 @@ export default function Home() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validate()) return;
+    const standardAmount = form.currentStandardAmount === "" ? 150 : parseFloat(form.currentStandardAmount);
     const result = calcNetBenefit({
       prevWage: prevWageNum,
       currWage: currWageNum,
-      currentStandardAmount: parseFloat(form.currentStandardAmount),
+      currentStandardAmount: standardAmount,
       acquisitionCost: parseFloat(form.acquisitionCost),
       equipmentType: form.equipmentType,
       usefulLife: parseInt(form.usefulLife),
@@ -488,13 +489,13 @@ export default function Home() {
               <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center font-bold shrink-0">
                 ①
               </span>
-              <span>給与の状況</span>
-              <Tooltip text="従業員全員に支払った給与・賞与の合計（役員報酬は除く）。源泉徴収簿や賃金台帳で確認できます" />
+              <span>従業員への給与</span>
+              <Tooltip text="従業員全員に支払った給与・賞与の年間合計です（社長の報酬は除く）。源泉徴収簿や賃金台帳、または年末に税務署に出す書類で確認できます" />
             </h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
-                  前期の給与総額
+                  昨年の給与総額（年間合計）
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -520,7 +521,7 @@ export default function Home() {
 
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
-                  当期の給与総額
+                  今年の給与総額（予定でOK）
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -581,18 +582,18 @@ export default function Home() {
             </div>
           </section>
 
-          {/* ② 償却資産の状況 */}
+          {/* ② 今持っている設備の状況 */}
           <section className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
             <h2 className="text-base font-semibold text-gray-700 mb-4 flex items-center gap-1">
               <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center font-bold shrink-0">
                 ②
               </span>
-              <span>償却資産の状況</span>
-              <Tooltip text="毎年届く「固定資産税・都市計画税 納税通知書」の償却資産の欄に記載されている金額です" />
+              <span>今持っている設備の状況</span>
+              <Tooltip text="毎年届く「固定資産税・都市計画税 納税通知書」の中にある「償却資産」の「課税標準額」欄の金額です。通知書が手元にない場合は空欄のまま計算できます（150万円として概算します）" />
             </h2>
             <div>
               <label className="block text-sm text-gray-600 mb-1">
-                現在の課税標準額
+                償却資産の課税標準額
               </label>
               <div className="flex items-center gap-2">
                 <input
@@ -608,7 +609,7 @@ export default function Home() {
                     }))
                   }
                   className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                  placeholder="例: 200"
+                  placeholder="わからなければ空欄でOK"
                 />
                 <span className="text-sm text-gray-500 whitespace-nowrap">
                   万円
@@ -620,7 +621,10 @@ export default function Home() {
                 </p>
               )}
               <p className="text-xs text-gray-400 mt-2">
-                ※ まだ償却資産がない場合は「0」と入力してください
+                ※ 空欄の場合は150万円（税金がかかる最低ライン）として計算します
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                ※ まだ設備を持っていない（届出をしていない）場合は「0」と入力してください
               </p>
             </div>
           </section>
@@ -632,7 +636,7 @@ export default function Home() {
                 ③
               </span>
               <span>今回の設備投資</span>
-              <Tooltip text="取得価額は設備の購入金額（税抜）。据付費・運搬費を含みます。耐用年数は国税庁の「耐用年数表」で確認できます" />
+              <Tooltip text="購入を検討している設備について入力してください。金額は税抜の購入価格（見積書の金額）です" />
             </h2>
             <div className="space-y-4">
               <div>
@@ -697,7 +701,7 @@ export default function Home() {
 
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
-                  取得価額
+                  購入金額（税抜）
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -724,6 +728,9 @@ export default function Home() {
                     {errors.acquisitionCost}
                   </p>
                 )}
+                <p className="text-xs text-gray-400 mt-1">
+                  ※ 設置費・運搬費を含む金額です（見積書や契約書の金額）
+                </p>
               </div>
 
               <div>
