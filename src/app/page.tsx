@@ -7,6 +7,7 @@ import {
   calcAssetTaxSchedule,
   EQUIPMENT_LABELS,
   MIN_COSTS,
+  ASSET_CATEGORIES,
   type EquipmentType,
   type NetBenefitResult,
   type YearlyResult,
@@ -30,6 +31,7 @@ interface FormValues {
   currentStandardAmount: string;
   acquisitionCost: string;
   equipmentType: EquipmentType;
+  assetCategory: string;   // ASSET_CATEGORIES内のインデックス or "custom"
   usefulLife: string;
 }
 
@@ -38,8 +40,9 @@ const DEFAULT_FORM: FormValues = {
   currWage: "",
   currentStandardAmount: "",
   acquisitionCost: "",
-  equipmentType: "machinery",
-  usefulLife: "10",
+  equipmentType: "fixtures",
+  assetCategory: "0",
+  usefulLife: "5",
 };
 
 const USEFUL_LIFE_OPTIONS = Array.from({ length: 18 }, (_, i) => i + 3);
@@ -231,7 +234,7 @@ function ResultView({
 
   // ケース4/5: 特例適用可能
   if (result.eligible) {
-    const { wageTier, wageRate, schedule, totalSaving, specialRate, specialYears } = result;
+    const { wageTier, wageRate, schedule, totalSaving, specialRate, specialYears, wageIncrease, netEffect } = result;
     const tierLabel =
       wageTier === "quarter"
         ? "3.0%以上（最大優遇）"
@@ -276,6 +279,34 @@ function ResultView({
             {schedule && <ScheduleTable schedule={schedule} />}
           </div>
 
+          {/* 人件費増 vs 節税額 トータル比較 */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 mb-3">経営判断サマリ</h2>
+            <div className="space-y-3">
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-sm text-gray-600">賃上げによる人件費増加（年間）</span>
+                <span className="text-sm font-semibold text-red-600">+{fmt(wageIncrease * 10000)}円</span>
+              </div>
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-sm text-gray-600">特例による節税額（{specialYears}年累計）</span>
+                <span className="text-sm font-semibold text-blue-700">-{fmt(totalSaving)}円</span>
+              </div>
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-sm text-gray-600">人件費増加（{specialYears}年累計）</span>
+                <span className="text-sm font-semibold text-red-600">+{fmt(wageIncrease * 10000 * specialYears)}円</span>
+              </div>
+              <div className={`flex justify-between items-center py-3 px-3 rounded-lg ${netEffect >= 0 ? 'bg-red-50' : 'bg-red-50'}`}>
+                <span className="text-sm font-bold text-gray-800">差引（節税 - 人件費増×{specialYears}年）</span>
+                <span className={`text-lg font-bold ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                  {(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? '+' : ''}{fmt(totalSaving - wageIncrease * 10000 * specialYears)}円
+                </span>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mt-3">
+              ※ 人件費増は賃上げが特例期間中も維持される前提での概算です。節税額だけでなく、人材確保・定着への投資効果も含めてご判断ください。
+            </p>
+          </div>
+
           {/* 累計軽減額 強調 */}
           <div className="bg-blue-600 rounded-xl p-5 text-white text-center">
             <p className="text-sm opacity-80 mb-1">
@@ -284,7 +315,7 @@ function ResultView({
             <p className="text-3xl font-bold">
               約 {fmt(Math.round((totalSaving ?? 0) / 1000) * 1000)} 円
             </p>
-            <p className="text-sm opacity-80 mt-1">の軽減が見込まれます</p>
+            <p className="text-sm opacity-80 mt-1">の償却資産税軽減が見込まれます</p>
           </div>
 
           {/* 3.0%なら比較 */}
@@ -610,12 +641,16 @@ export default function Home() {
                 </label>
                 <select
                   value={form.equipmentType}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const eqType = e.target.value as EquipmentType;
+                    const cats = ASSET_CATEGORIES[eqType];
                     setForm((f) => ({
                       ...f,
-                      equipmentType: e.target.value as EquipmentType,
-                    }))
-                  }
+                      equipmentType: eqType,
+                      assetCategory: "0",
+                      usefulLife: String(cats[0].usefulLife),
+                    }));
+                  }}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
                 >
                   {(
@@ -625,6 +660,38 @@ export default function Home() {
                       {v}（{MIN_COSTS[k]}万円以上）
                     </option>
                   ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  具体的な資産の種類
+                  <Tooltip text="該当する資産を選ぶと耐用年数が自動設定されます。一覧にない場合は「その他（手動入力）」を選んでください" />
+                </label>
+                <select
+                  value={form.assetCategory}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "custom") {
+                      setForm((f) => ({ ...f, assetCategory: "custom" }));
+                    } else {
+                      const cats = ASSET_CATEGORIES[form.equipmentType];
+                      const cat = cats[parseInt(val)];
+                      setForm((f) => ({
+                        ...f,
+                        assetCategory: val,
+                        usefulLife: String(cat.usefulLife),
+                      }));
+                    }
+                  }}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+                >
+                  {ASSET_CATEGORIES[form.equipmentType].map((cat, i) => (
+                    <option key={i} value={String(i)}>
+                      {cat.label}（{cat.usefulLife}年）
+                    </option>
+                  ))}
+                  <option value="custom">その他（手動入力）</option>
                 </select>
               </div>
 
@@ -662,13 +729,17 @@ export default function Home() {
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
                   耐用年数
+                  {form.assetCategory !== "custom" && (
+                    <span className="text-xs text-green-600 ml-2">（自動設定済み）</span>
+                  )}
                 </label>
                 <select
                   value={form.usefulLife}
                   onChange={(e) =>
                     setForm((f) => ({ ...f, usefulLife: e.target.value }))
                   }
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+                  disabled={form.assetCategory !== "custom"}
+                  className={`w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white ${form.assetCategory !== "custom" ? "bg-gray-50 text-gray-500" : ""}`}
                 >
                   {USEFUL_LIFE_OPTIONS.map((y) => (
                     <option key={y} value={y}>

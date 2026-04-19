@@ -17,6 +17,8 @@ export type NetBenefitResult =
       totalSaving: number;
       specialRate: number;
       specialYears: number;
+      wageIncrease: number;   // 人件費増加額（万円）
+      netEffect: number;      // ネット効果 = 節税額 - 人件費増加額（円）
     };
 
 // 設計書§4.4: 損得計算の全体フロー
@@ -60,6 +62,11 @@ export function calcNetBenefit(input: {
   const schedule = calcAssetTaxSchedule(costYen, input.usefulLife, specialRate, specialYears);
   const totalSaving = schedule.reduce((sum, r) => sum + r.saving, 0);
 
+  // 人件費増加額（万円）と節税とのネット効果
+  const wageIncrease = input.currWage - input.prevWage;  // 万円
+  const wageIncreaseYen = wageIncrease * 10000;          // 円
+  const netEffect = totalSaving - wageIncreaseYen;       // 円（プラス=トータルで得）
+
   return {
     eligible: true,
     wageTier: wage.tier,
@@ -68,5 +75,7 @@ export function calcNetBenefit(input: {
     totalSaving,
     specialRate,
     specialYears,
+    wageIncrease,
+    netEffect,
   };
 }
