@@ -283,21 +283,21 @@ function ResultView({
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
             <h2 className="text-sm font-semibold text-gray-500 mb-3">経営判断サマリ</h2>
             <div className="space-y-3">
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
                 <span className="text-sm text-gray-600">賃上げによる人件費増加（年間）</span>
-                <span className="text-sm font-semibold text-red-600">+{fmt(wageIncrease * 10000)}円</span>
+                <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000)}円</span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
                 <span className="text-sm text-gray-600">特例による節税額（{specialYears}年累計）</span>
-                <span className="text-sm font-semibold text-blue-700">-{fmt(totalSaving)}円</span>
+                <span className="text-sm font-semibold text-blue-700 sm:text-right">-{fmt(totalSaving)}円</span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
                 <span className="text-sm text-gray-600">人件費増加（{specialYears}年累計）</span>
-                <span className="text-sm font-semibold text-red-600">+{fmt(wageIncrease * 10000 * specialYears)}円</span>
+                <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000 * specialYears)}円</span>
               </div>
-              <div className={`flex justify-between items-center py-3 px-3 rounded-lg ${netEffect >= 0 ? 'bg-red-50' : 'bg-red-50'}`}>
-                <span className="text-sm font-bold text-gray-800">差引（節税 - 人件費増×{specialYears}年）</span>
-                <span className={`text-lg font-bold ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+              <div className={`py-3 px-3 rounded-lg ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'bg-green-50' : 'bg-red-50'}`}>
+                <span className="text-sm font-bold text-gray-800 block">差引（節税 - 人件費増 x {specialYears}年）</span>
+                <span className={`text-xl font-bold block mt-1 ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
                   {(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? '+' : ''}{fmt(totalSaving - wageIncrease * 10000 * specialYears)}円
                 </span>
               </div>
