@@ -2,15 +2,10 @@
 const config = {
   testEnvironment: 'node',
   transform: {
-    '^.+\\.tsx?$': ['ts-jest', {
-      tsconfig: {
-        module: 'commonjs',
-        moduleResolution: 'node',
-        esModuleInterop: true,
-      },
-    }],
+    '^.+\\.tsx?$': '/tmp/babel-ts-transform.js',
   },
   moduleNameMapper: { '^@/(.*)$': '<rootDir>/src/$1' },
+  transformIgnorePatterns: [],
 };
 
 module.exports = config;
