@@ -2,14 +2,16 @@
 
 import { useState } from "react";
 import {
-  calcNetBenefit,
   calcWageIncreaseRate,
+  calcWageGap,
   calcAssetTaxSchedule,
+  checkExemption,
   EQUIPMENT_LABELS,
   MIN_COSTS,
   ASSET_CATEGORIES,
+  DEPRECIATION_RATES,
   type EquipmentType,
-  type NetBenefitResult,
+  type WageTier,
   type YearlyResult,
 } from "@/lib/calc";
 
@@ -25,27 +27,158 @@ function fmt(n: number): string {
 // 型定義
 // ---------------------------------------------------------------------------
 
+interface EquipmentEntry {
+  id: number;
+  equipmentType: EquipmentType;
+  assetCategory: string;
+  acquisitionCost: string;
+  usefulLife: string;
+}
+
 interface FormValues {
   prevWage: string;
   currWage: string;
   currentStandardAmount: string;
-  acquisitionCost: string;
-  equipmentType: EquipmentType;
-  assetCategory: string;   // ASSET_CATEGORIES内のインデックス or "custom"
-  usefulLife: string;
+  equipment: EquipmentEntry[];
+}
+
+let nextId = 1;
+
+function createEquipmentEntry(): EquipmentEntry {
+  return {
+    id: nextId++,
+    equipmentType: "fixtures",
+    assetCategory: "0",
+    acquisitionCost: "",
+    usefulLife: "5",
+  };
 }
 
 const DEFAULT_FORM: FormValues = {
   prevWage: "",
   currWage: "",
   currentStandardAmount: "",
-  acquisitionCost: "",
-  equipmentType: "fixtures",
-  assetCategory: "0",
-  usefulLife: "5",
+  equipment: [createEquipmentEntry()],
 };
 
 const USEFUL_LIFE_OPTIONS = Array.from({ length: 18 }, (_, i) => i + 3);
+
+// ---------------------------------------------------------------------------
+// 複数設備の計算結果
+// ---------------------------------------------------------------------------
+
+interface EquipmentResult {
+  entry: EquipmentEntry;
+  label: string;
+  eligible: boolean;
+  reason?: string;
+  minCost?: number;
+  schedule?: YearlyResult[];
+  totalSaving?: number;
+  specialRate?: number;
+  specialYears?: number;
+  firstYearValue?: number; // 初年度評価額（万円）
+}
+
+type MultiResult = {
+  type: "wage_insufficient";
+  wageRate: number;
+  gap: number | null;
+} | {
+  type: "below_exemption";
+  total: number;
+} | {
+  type: "calculated";
+  wageTier: WageTier;
+  wageRate: number;
+  wageIncrease: number;
+  equipmentResults: EquipmentResult[];
+  grandTotalSaving: number;
+  exemptionTotal: number;
+}
+
+function calcMultiEquipment(
+  prevWage: number,
+  currWage: number,
+  currentStandardAmount: number,
+  equipment: EquipmentEntry[],
+): MultiResult {
+  // Step 1: 賃上げ率チェック
+  const wage = calcWageIncreaseRate(prevWage, currWage);
+  if (wage.tier === "none") {
+    const gap = calcWageGap(prevWage, currWage);
+    return { type: "wage_insufficient", wageRate: wage.rate, gap };
+  }
+
+  // Step 2: 各設備の初年度評価額を計算し、免税点チェック
+  let totalFirstYearValue = 0;
+  const equipmentResults: EquipmentResult[] = [];
+
+  for (const entry of equipment) {
+    const cost = parseFloat(entry.acquisitionCost);
+    const minCost = MIN_COSTS[entry.equipmentType];
+    const label = EQUIPMENT_LABELS[entry.equipmentType];
+    const cats = ASSET_CATEGORIES[entry.equipmentType];
+    const catLabel = entry.assetCategory === "custom"
+      ? "手動入力"
+      : cats[parseInt(entry.assetCategory)]?.label ?? "";
+    const displayLabel = `${catLabel}`;
+
+    // 金額要件チェック
+    if (cost < minCost) {
+      equipmentResults.push({
+        entry,
+        label: displayLabel,
+        eligible: false,
+        reason: "below_minimum",
+        minCost,
+      });
+      continue;
+    }
+
+    const costYen = cost * 10000;
+    const usefulLife = parseInt(entry.usefulLife);
+    const depRate = DEPRECIATION_RATES[usefulLife];
+    const firstYearValue = Math.floor(costYen * (1 - depRate / 2)) / 10000;
+    totalFirstYearValue += firstYearValue;
+
+    const specialRate = wage.tier === "quarter" ? 0.25 : 0.5;
+    const specialYears = wage.tier === "quarter" ? 5 : 3;
+    const schedule = calcAssetTaxSchedule(costYen, usefulLife, specialRate, specialYears);
+    const totalSaving = schedule.reduce((sum, r) => sum + r.saving, 0);
+
+    equipmentResults.push({
+      entry,
+      label: displayLabel,
+      eligible: true,
+      schedule,
+      totalSaving,
+      specialRate,
+      specialYears,
+      firstYearValue,
+    });
+  }
+
+  // 免税点チェック（全設備合計）
+  const exemptionTotal = currentStandardAmount + totalFirstYearValue;
+  if (exemptionTotal < 150) {
+    return { type: "below_exemption", total: exemptionTotal };
+  }
+
+  const grandTotalSaving = equipmentResults
+    .filter((r) => r.eligible)
+    .reduce((sum, r) => sum + (r.totalSaving ?? 0), 0);
+
+  return {
+    type: "calculated",
+    wageTier: wage.tier,
+    wageRate: wage.rate,
+    wageIncrease: currWage - prevWage,
+    equipmentResults,
+    grandTotalSaving,
+    exemptionTotal,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Tooltip コンポーネント
@@ -61,7 +194,7 @@ function Tooltip({ text }: { text: string }) {
         onClick={() => setOpen((v) => !v)}
         className="ml-1 cursor-pointer text-blue-500 text-xs border border-blue-300 rounded-full px-1.5 py-0.5 leading-none hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-300"
       >
-        💡
+        ?
       </button>
       {open && (
         <span className="absolute left-0 top-full mt-1 z-20 w-72 max-w-[90vw] bg-gray-800 text-white text-xs rounded-lg p-3 shadow-xl leading-relaxed">
@@ -80,14 +213,34 @@ function Tooltip({ text }: { text: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// 結果画面
+// 共通コンポーネント
 // ---------------------------------------------------------------------------
 
 function Disclaimer() {
   return (
     <div className="mt-6 p-4 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-800 leading-relaxed">
-      ⚠️ この数値は一般的な計算式に基づく概算です。具体的な申請判断は税理士等の専門家にご相談ください。
+      この数値は一般的な計算式に基づく概算です。具体的な申請判断は税理士等の専門家にご相談ください。
     </div>
+  );
+}
+
+function ResultHeader() {
+  return (
+    <header className="mb-4 text-center">
+      <h1 className="text-lg sm:text-xl font-bold text-gray-800">計算結果</h1>
+    </header>
+  );
+}
+
+function ResetButton({ onReset }: { onReset: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onReset}
+      className="w-full mt-4 border-2 border-blue-600 text-blue-600 hover:bg-blue-50 font-semibold py-3 rounded-xl text-base transition-colors"
+    >
+      条件を変えて再計算
+    </button>
   );
 }
 
@@ -130,48 +283,19 @@ function ScheduleTable({ schedule }: { schedule: YearlyResult[] }) {
   );
 }
 
-function ResultView({
+// ---------------------------------------------------------------------------
+// 結果画面（複数設備対応）
+// ---------------------------------------------------------------------------
+
+function MultiResultView({
   result,
-  form,
   onReset,
 }: {
-  result: NetBenefitResult;
-  form: FormValues;
+  result: MultiResult;
   onReset: () => void;
 }) {
-  const equipmentLabel = EQUIPMENT_LABELS[form.equipmentType];
-  const acquisitionCost = parseFloat(form.acquisitionCost);
-  const usefulLife = parseInt(form.usefulLife);
-
-  // ケース1: 設備金額要件未達
-  if (!result.eligible && result.reason === "below_minimum") {
-    return (
-      <main className="min-h-screen bg-gray-50 py-8 px-4">
-        <div className="max-w-xl mx-auto">
-          <ResultHeader />
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-4">
-            <div className="flex items-start gap-3">
-              <span className="text-2xl mt-0.5">❌</span>
-              <div>
-                <p className="font-semibold text-gray-800 leading-relaxed">
-                  この設備は金額要件を満たしていません
-                </p>
-                <p className="text-sm text-gray-600 mt-2">
-                  {equipmentLabel}は <strong>{result.minCost}万円以上</strong> が対象となります。
-                  現在の入力値（{fmt(acquisitionCost)}万円）は要件額を下回っています。
-                </p>
-              </div>
-            </div>
-          </div>
-          <Disclaimer />
-          <ResetButton onReset={onReset} />
-        </div>
-      </main>
-    );
-  }
-
-  // ケース2: 賃上げ率不足
-  if (!result.eligible && result.reason === "wage_insufficient") {
+  // 賃上げ率不足
+  if (result.type === "wage_insufficient") {
     return (
       <main className="min-h-screen bg-gray-50 py-8 px-4">
         <div className="max-w-xl mx-auto">
@@ -181,16 +305,16 @@ function ResultView({
               <span className="text-2xl mt-0.5">⚠️</span>
               <div>
                 <p className="font-semibold text-gray-800">
-                  賃上げ率が{result.rate !== undefined ? result.rate.toFixed(2) : "—"}%のため、現行制度では特例を受けられない可能性があります
+                  賃上げ率が{result.wageRate.toFixed(2)}%のため、特例を受けられない可能性があります
                 </p>
                 <p className="text-sm text-gray-600 mt-2">
-                  令和7年4月改正後の制度では、<strong>給与総額1.5%以上の賃上げ表明</strong>が要件となっています。
+                  <strong>給与総額1.5%以上の賃上げ</strong>が要件です。
                 </p>
               </div>
             </div>
             {result.gap != null && result.gap > 0 && (
               <div className="ml-9 p-3 rounded-lg bg-blue-50 text-sm text-blue-800">
-                💡 あと <strong>{fmt(Math.ceil(result.gap))}万円</strong> の賃上げで1.5%に届く可能性があります
+                あと <strong>{fmt(Math.ceil(result.gap))}万円</strong> の賃上げで1.5%に届きます
               </div>
             )}
           </div>
@@ -201,8 +325,8 @@ function ResultView({
     );
   }
 
-  // ケース3: 免税点以下
-  if (!result.eligible && result.reason === "below_exemption") {
+  // 免税点以下
+  if (result.type === "below_exemption") {
     return (
       <main className="min-h-screen bg-gray-50 py-8 px-4">
         <div className="max-w-xl mx-auto">
@@ -215,12 +339,9 @@ function ResultView({
                   課税標準額の合計が150万円未満のため、そもそも償却資産税がかかりません
                 </p>
                 <p className="text-sm text-gray-600 mt-2">
-                  現在の課税標準額 + 新規設備の評価額の合計が
-                  <strong> 約{result.total !== undefined ? fmt(Math.round(result.total)) : "—"}万円</strong>
-                  と見込まれ、免税点（150万円）を下回っています。
-                </p>
-                <p className="text-sm text-gray-500 mt-2">
-                  先端設備の特例を使うメリットはありません。
+                  全設備の評価額合計が
+                  <strong> 約{fmt(Math.round(result.total))}万円</strong>
+                  と見込まれ、免税点を下回っています。特例を使うメリットはありません。
                 </p>
               </div>
             </div>
@@ -232,163 +353,295 @@ function ResultView({
     );
   }
 
-  // ケース4/5: 特例適用可能
-  if (result.eligible) {
-    const { wageTier, wageRate, schedule, totalSaving, specialRate, specialYears, wageIncrease, netEffect } = result;
-    const tierLabel =
-      wageTier === "quarter"
-        ? "3.0%以上（最大優遇）"
-        : "1.5%以上3.0%未満";
-    const specialRateLabel = wageTier === "quarter" ? "1/4" : "1/2";
+  // 計算結果表示
+  const { wageTier, wageRate, wageIncrease, equipmentResults, grandTotalSaving } = result;
+  const eligibleResults = equipmentResults.filter((r) => r.eligible);
+  const ineligibleResults = equipmentResults.filter((r) => !r.eligible);
+  const tierLabel = wageTier === "quarter" ? "3.0%以上（最大優遇）" : "1.5%以上3.0%未満";
+  const specialRateLabel = wageTier === "quarter" ? "1/4" : "1/2";
+  const specialYears = wageTier === "quarter" ? 5 : 3;
 
-    // 半分適用の場合、3.0%以上の場合の比較計算
-    let quarterSaving: number | null = null;
-    let additionalSaving: number | null = null;
-    if (wageTier === "half") {
-      const costYen = acquisitionCost * 10000;
-      const qSchedule = calcAssetTaxSchedule(costYen, usefulLife, 0.25, 5);
-      quarterSaving = qSchedule.reduce((s, r) => s + r.saving, 0);
-      additionalSaving = quarterSaving - (totalSaving ?? 0);
+  // 3%未満の場合の比較計算
+  let quarterGrandTotal: number | null = null;
+  if (wageTier === "half") {
+    quarterGrandTotal = 0;
+    for (const er of eligibleResults) {
+      const costYen = parseFloat(er.entry.acquisitionCost) * 10000;
+      const ul = parseInt(er.entry.usefulLife);
+      const qSchedule = calcAssetTaxSchedule(costYen, ul, 0.25, 5);
+      quarterGrandTotal += qSchedule.reduce((s, r) => s + r.saving, 0);
     }
-
-    return (
-      <main className="min-h-screen bg-gray-50 py-8 px-4">
-        <div className="max-w-xl mx-auto space-y-4">
-          <ResultHeader />
-
-          {/* 適用区分 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 mb-3">あなたの賃上げ区分</h2>
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">✅</span>
-              <div>
-                <p className="font-bold text-gray-800">
-                  賃上げ率{wageRate !== undefined && wageRate < 100 ? `${wageRate.toFixed(2)}%` : "（新規雇用）"}
-                  <span className="ml-2 text-sm font-normal text-gray-500">— {tierLabel}</span>
-                </p>
-                <p className="text-sm text-blue-700 mt-1">
-                  課税標準 <strong>{specialRateLabel}</strong> × <strong>{specialYears}年間</strong> の特例が適用される見込みです
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* 年度別シミュレーション表 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 mb-3">年度別 税額シミュレーション</h2>
-            {schedule && <ScheduleTable schedule={schedule} />}
-          </div>
-
-          {/* 人件費増 vs 節税額 トータル比較 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 mb-3">経営判断サマリ</h2>
-            <div className="space-y-3">
-              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
-                <span className="text-sm text-gray-600">賃上げによる人件費増加（年間）</span>
-                <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000)}円</span>
-              </div>
-              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
-                <span className="text-sm text-gray-600">特例による節税額（{specialYears}年累計）</span>
-                <span className="text-sm font-semibold text-blue-700 sm:text-right">-{fmt(totalSaving)}円</span>
-              </div>
-              <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
-                <span className="text-sm text-gray-600">人件費増加（{specialYears}年累計）</span>
-                <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000 * specialYears)}円</span>
-              </div>
-              <div className={`py-3 px-3 rounded-lg ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'bg-green-50' : 'bg-red-50'}`}>
-                <span className="text-sm font-bold text-gray-800 block">差引（節税 - 人件費増 x {specialYears}年）</span>
-                <span className={`text-xl font-bold block mt-1 ${(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
-                  {(totalSaving - wageIncrease * 10000 * specialYears) >= 0 ? '+' : ''}{fmt(totalSaving - wageIncrease * 10000 * specialYears)}円
-                </span>
-              </div>
-            </div>
-            <p className="text-xs text-gray-400 mt-3">
-              ※ 人件費増は賃上げが特例期間中も維持される前提での概算です。節税額だけでなく、人材確保・定着への投資効果も含めてご判断ください。
-            </p>
-          </div>
-
-          {/* 累計軽減額 強調 */}
-          <div className="bg-blue-600 rounded-xl p-5 text-white text-center">
-            <p className="text-sm opacity-80 mb-1">
-              この設備投資で、{specialYears}年間で
-            </p>
-            <p className="text-3xl font-bold">
-              約 {fmt(Math.round((totalSaving ?? 0) / 1000) * 1000)} 円
-            </p>
-            <p className="text-sm opacity-80 mt-1">の償却資産税軽減が見込まれます</p>
-          </div>
-
-          {/* 3.0%なら比較 */}
-          {wageTier === "half" && quarterSaving !== null && additionalSaving !== null && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-              <h2 className="text-sm font-semibold text-gray-500 mb-2">💡 賃上げ率3.0%以上なら？</h2>
-              <p className="text-sm text-gray-700">
-                1/4 × 5年間の適用で、さらに
-                <strong className="text-green-700 mx-1">約{fmt(Math.round(additionalSaving / 1000) * 1000)}円</strong>
-                の追加軽減が見込まれます
-              </p>
-              <p className="text-xs text-gray-500 mt-1">
-                （合計で約{fmt(Math.round(quarterSaving / 1000) * 1000)}円程度の軽減見込み）
-              </p>
-            </div>
-          )}
-
-          {/* 免税点チェック結果 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 mb-2">⚠️ 免税点チェック</h2>
-            <p className="text-sm text-gray-700">
-              現在の課税標準額 + 新規設備の評価額の合計が 150万円以上のため、
-              償却資産税の課税対象となっています。
-            </p>
-          </div>
-
-          {/* 次のステップ */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 mb-3">📋 次のステップ</h2>
-            <ul className="space-y-2 text-sm text-gray-700">
-              <li className="flex items-start gap-2">
-                <span className="text-blue-500 font-bold mt-0.5">1.</span>
-                認定支援機関に相談してください（商工会議所・商工会は無料で対応）
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-500 font-bold mt-0.5">2.</span>
-                <strong>設備取得「前」</strong>に先端設備等導入計画の認定申請が必要です
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-500 font-bold mt-0.5">3.</span>
-                適用期限は令和9年3月31日までです
-              </li>
-            </ul>
-          </div>
-
-          <Disclaimer />
-          <ResetButton onReset={onReset} />
-        </div>
-      </main>
-    );
   }
 
-  // フォールバック（到達しないはず）
-  return null;
-}
-
-function ResultHeader() {
   return (
-    <header className="mb-4 text-center">
-      <h1 className="text-lg sm:text-xl font-bold text-gray-800">計算結果</h1>
-    </header>
+    <main className="min-h-screen bg-gray-50 py-8 px-4">
+      <div className="max-w-xl mx-auto space-y-4">
+        <ResultHeader />
+
+        {/* 適用区分 */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+          <h2 className="text-sm font-semibold text-gray-500 mb-3">あなたの賃上げ区分</h2>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">✅</span>
+            <div>
+              <p className="font-bold text-gray-800">
+                賃上げ率{wageRate < 100 ? `${wageRate.toFixed(2)}%` : "（新規雇用）"}
+                <span className="ml-2 text-sm font-normal text-gray-500">— {tierLabel}</span>
+              </p>
+              <p className="text-sm text-blue-700 mt-1">
+                課税標準 <strong>{specialRateLabel}</strong> x <strong>{specialYears}年間</strong> の特例が適用される見込みです
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* 金額要件未達の設備がある場合 */}
+        {ineligibleResults.length > 0 && (
+          <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-5">
+            <h2 className="text-sm font-semibold text-amber-600 mb-2">対象外の設備</h2>
+            {ineligibleResults.map((r) => (
+              <p key={r.entry.id} className="text-sm text-gray-700">
+                <strong>{r.label}</strong>（{fmt(parseFloat(r.entry.acquisitionCost))}万円）
+                — {EQUIPMENT_LABELS[r.entry.equipmentType]}は{r.minCost}万円以上が必要です
+              </p>
+            ))}
+          </div>
+        )}
+
+        {/* 設備ごとの年度別シミュレーション */}
+        {eligibleResults.map((er, idx) => (
+          <div key={er.entry.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 mb-1">
+              設備{eligibleResults.length > 1 ? ` ${idx + 1}` : ""}: {er.label}
+            </h2>
+            <p className="text-xs text-gray-400 mb-3">
+              {fmt(parseFloat(er.entry.acquisitionCost))}万円 / 耐用{er.entry.usefulLife}年
+            </p>
+            {er.schedule && <ScheduleTable schedule={er.schedule} />}
+            <p className="text-sm text-blue-700 font-semibold mt-2 text-right">
+              軽減額: {fmt(er.totalSaving ?? 0)}円
+            </p>
+          </div>
+        ))}
+
+        {/* 人件費増 vs 節税額 トータル比較 */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+          <h2 className="text-sm font-semibold text-gray-500 mb-3">経営判断サマリ</h2>
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
+              <span className="text-sm text-gray-600">賃上げによる人件費増加（年間）</span>
+              <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000)}円</span>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
+              <span className="text-sm text-gray-600">特例による節税額（{specialYears}年累計・全設備合計）</span>
+              <span className="text-sm font-semibold text-blue-700 sm:text-right">-{fmt(grandTotalSaving)}円</span>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:justify-between py-2 border-b border-gray-100 gap-0.5">
+              <span className="text-sm text-gray-600">人件費増加（{specialYears}年累計）</span>
+              <span className="text-sm font-semibold text-red-600 sm:text-right">+{fmt(wageIncrease * 10000 * specialYears)}円</span>
+            </div>
+            <div className={`py-3 px-3 rounded-lg ${(grandTotalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'bg-green-50' : 'bg-red-50'}`}>
+              <span className="text-sm font-bold text-gray-800 block">差引（節税 - 人件費増 x {specialYears}年）</span>
+              <span className={`text-xl font-bold block mt-1 ${(grandTotalSaving - wageIncrease * 10000 * specialYears) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                {(grandTotalSaving - wageIncrease * 10000 * specialYears) >= 0 ? '+' : ''}{fmt(grandTotalSaving - wageIncrease * 10000 * specialYears)}円
+              </span>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 mt-3">
+            ※ 人件費増は賃上げが特例期間中も維持される前提での概算です。節税額だけでなく、人材確保・定着への投資効果も含めてご判断ください。
+          </p>
+        </div>
+
+        {/* 累計軽減額 強調 */}
+        <div className="bg-blue-600 rounded-xl p-5 text-white text-center">
+          <p className="text-sm opacity-80 mb-1">
+            全{eligibleResults.length}件の設備投資で
+          </p>
+          <p className="text-3xl font-bold">
+            約 {fmt(Math.round(grandTotalSaving / 1000) * 1000)} 円
+          </p>
+          <p className="text-sm opacity-80 mt-1">の償却資産税軽減が見込まれます</p>
+        </div>
+
+        {/* 3.0%なら比較 */}
+        {wageTier === "half" && quarterGrandTotal !== null && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 mb-2">賃上げ率3.0%以上なら？</h2>
+            <p className="text-sm text-gray-700">
+              1/4 x 5年間の適用で、さらに
+              <strong className="text-green-700 mx-1">約{fmt(Math.round((quarterGrandTotal - grandTotalSaving) / 1000) * 1000)}円</strong>
+              の追加軽減が見込まれます
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              （合計で約{fmt(Math.round(quarterGrandTotal / 1000) * 1000)}円程度の軽減見込み）
+            </p>
+          </div>
+        )}
+
+        {/* 次のステップ */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+          <h2 className="text-sm font-semibold text-gray-500 mb-3">次のステップ</h2>
+          <ul className="space-y-2 text-sm text-gray-700">
+            <li className="flex items-start gap-2">
+              <span className="text-blue-500 font-bold mt-0.5">1.</span>
+              認定支援機関に相談してください（商工会議所・商工会は無料で対応）
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-blue-500 font-bold mt-0.5">2.</span>
+              <strong>設備取得「前」</strong>に先端設備等導入計画の認定申請が必要です
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-blue-500 font-bold mt-0.5">3.</span>
+              適用期限は令和9年3月31日までです
+            </li>
+          </ul>
+        </div>
+
+        <Disclaimer />
+        <ResetButton onReset={onReset} />
+      </div>
+    </main>
   );
 }
 
-function ResetButton({ onReset }: { onReset: () => void }) {
+// ---------------------------------------------------------------------------
+// 設備入力行コンポーネント
+// ---------------------------------------------------------------------------
+
+function EquipmentRow({
+  entry,
+  index,
+  total,
+  onChange,
+  onRemove,
+}: {
+  entry: EquipmentEntry;
+  index: number;
+  total: number;
+  onChange: (updated: EquipmentEntry) => void;
+  onRemove: () => void;
+}) {
+  const errors: Record<string, string> = {};
+
   return (
-    <button
-      type="button"
-      onClick={onReset}
-      className="w-full mt-4 border-2 border-blue-600 text-blue-600 hover:bg-blue-50 font-semibold py-3 rounded-xl text-base transition-colors"
-    >
-      条件を変えて再計算
-    </button>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-gray-700">
+          設備 {total > 1 ? index + 1 : ""}
+        </h3>
+        {total > 1 && (
+          <button
+            type="button"
+            onClick={onRemove}
+            className="text-xs text-red-500 hover:text-red-700 underline"
+          >
+            削除
+          </button>
+        )}
+      </div>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">設備の種類</label>
+          <select
+            value={entry.equipmentType}
+            onChange={(e) => {
+              const eqType = e.target.value as EquipmentType;
+              const cats = ASSET_CATEGORIES[eqType];
+              onChange({
+                ...entry,
+                equipmentType: eqType,
+                assetCategory: "0",
+                usefulLife: String(cats[0].usefulLife),
+              });
+            }}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+          >
+            {(Object.entries(EQUIPMENT_LABELS) as [EquipmentType, string][]).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}（{MIN_COSTS[k]}万円以上）
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">
+            具体的な資産の種類
+            <Tooltip text="該当する資産を選ぶと耐用年数が自動設定されます。一覧にない場合は「その他（手動入力）」を選んでください" />
+          </label>
+          <select
+            value={entry.assetCategory}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === "custom") {
+                onChange({ ...entry, assetCategory: "custom" });
+              } else {
+                const cats = ASSET_CATEGORIES[entry.equipmentType];
+                const cat = cats[parseInt(val)];
+                onChange({
+                  ...entry,
+                  assetCategory: val,
+                  usefulLife: String(cat.usefulLife),
+                });
+              }
+            }}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+          >
+            {ASSET_CATEGORIES[entry.equipmentType].map((cat, i) => (
+              <option key={i} value={String(i)}>
+                {cat.label}（{cat.usefulLife}年）
+              </option>
+            ))}
+            <option value="custom">その他（手動入力）</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">購入金額（税抜）</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              inputMode="decimal"
+              value={entry.acquisitionCost}
+              onChange={(e) =>
+                onChange({ ...entry, acquisitionCost: e.target.value })
+              }
+              className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+              placeholder={`例: ${MIN_COSTS[entry.equipmentType]}`}
+            />
+            <span className="text-sm text-gray-500 whitespace-nowrap">万円</span>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            ※ 設置費・運搬費を含む金額です（見積書や契約書の金額）
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">
+            耐用年数
+            {entry.assetCategory !== "custom" && (
+              <span className="text-xs text-green-600 ml-2">（自動設定済み）</span>
+            )}
+          </label>
+          <select
+            value={entry.usefulLife}
+            onChange={(e) =>
+              onChange({ ...entry, usefulLife: e.target.value })
+            }
+            disabled={entry.assetCategory !== "custom"}
+            className={`w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white ${entry.assetCategory !== "custom" ? "bg-gray-50 text-gray-500" : ""}`}
+          >
+            {USEFUL_LIFE_OPTIONS.map((y) => (
+              <option key={y} value={y}>
+                {y}年
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -398,11 +651,8 @@ function ResetButton({ onReset }: { onReset: () => void }) {
 
 export default function Home() {
   const [form, setForm] = useState<FormValues>(DEFAULT_FORM);
-  const [submitted, setSubmitted] = useState<{
-    result: NetBenefitResult;
-    form: FormValues;
-  } | null>(null);
-  const [errors, setErrors] = useState<Partial<Record<keyof FormValues, string>>>({});
+  const [submitted, setSubmitted] = useState<MultiResult | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   const prevWageNum = parseFloat(form.prevWage) || 0;
   const currWageNum = parseFloat(form.currWage) || 0;
@@ -412,11 +662,10 @@ export default function Home() {
       : null;
 
   function validate(): boolean {
-    const errs: Partial<Record<keyof FormValues, string>> = {};
+    const errs: Record<string, string> = {};
     const pv = parseFloat(form.prevWage);
     const cv = parseFloat(form.currWage);
     const sa = parseFloat(form.currentStandardAmount);
-    const ac = parseFloat(form.acquisitionCost);
 
     if (form.prevWage === "" || isNaN(pv) || pv < 0)
       errs.prevWage = "0以上の数値を入力してください";
@@ -424,8 +673,12 @@ export default function Home() {
       errs.currWage = "0以上の数値を入力してください";
     if (form.currentStandardAmount !== "" && (isNaN(sa) || sa < 0))
       errs.currentStandardAmount = "0以上の数値を入力してください";
-    if (form.acquisitionCost === "" || isNaN(ac) || ac <= 0)
-      errs.acquisitionCost = "0より大きい数値を入力してください";
+
+    for (let i = 0; i < form.equipment.length; i++) {
+      const ac = parseFloat(form.equipment[i].acquisitionCost);
+      if (form.equipment[i].acquisitionCost === "" || isNaN(ac) || ac <= 0)
+        errs[`equipment_${i}_cost`] = "0より大きい数値を入力してください";
+    }
 
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -435,15 +688,13 @@ export default function Home() {
     e.preventDefault();
     if (!validate()) return;
     const standardAmount = form.currentStandardAmount === "" ? 150 : parseFloat(form.currentStandardAmount);
-    const result = calcNetBenefit({
-      prevWage: prevWageNum,
-      currWage: currWageNum,
-      currentStandardAmount: standardAmount,
-      acquisitionCost: parseFloat(form.acquisitionCost),
-      equipmentType: form.equipmentType,
-      usefulLife: parseInt(form.usefulLife),
-    });
-    setSubmitted({ result, form });
+    const result = calcMultiEquipment(
+      prevWageNum,
+      currWageNum,
+      standardAmount,
+      form.equipment,
+    );
+    setSubmitted(result);
     if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
@@ -455,14 +706,29 @@ export default function Home() {
     setErrors({});
   }
 
+  function updateEquipment(index: number, updated: EquipmentEntry) {
+    setForm((f) => ({
+      ...f,
+      equipment: f.equipment.map((eq, i) => (i === index ? updated : eq)),
+    }));
+  }
+
+  function addEquipment() {
+    setForm((f) => ({
+      ...f,
+      equipment: [...f.equipment, createEquipmentEntry()],
+    }));
+  }
+
+  function removeEquipment(index: number) {
+    setForm((f) => ({
+      ...f,
+      equipment: f.equipment.filter((_, i) => i !== index),
+    }));
+  }
+
   if (submitted) {
-    return (
-      <ResultView
-        result={submitted.result}
-        form={submitted.form}
-        onReset={handleReset}
-      />
-    );
+    return <MultiResultView result={submitted} onReset={handleReset} />;
   }
 
   return (
@@ -476,14 +742,14 @@ export default function Home() {
             &nbsp;かんたん損得チェック
           </h1>
           <p className="mt-2 text-sm text-gray-500">
-            3項目を入力するだけで、特例を使うと
+            入力するだけで、特例を使うと
             <br className="sm:hidden" />
             いくら軽減が見込まれるか計算できます
           </p>
         </header>
 
         <form onSubmit={handleSubmit} noValidate className="space-y-5">
-          {/* ① 給与の状況 */}
+          {/* ① 従業員への給与 */}
           <section className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
             <h2 className="text-base font-semibold text-gray-700 mb-4 flex items-center gap-1">
               <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center font-bold shrink-0">
@@ -510,9 +776,7 @@ export default function Home() {
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
                     placeholder="例: 500"
                   />
-                  <span className="text-sm text-gray-500 whitespace-nowrap">
-                    万円
-                  </span>
+                  <span className="text-sm text-gray-500 whitespace-nowrap">万円</span>
                 </div>
                 {errors.prevWage && (
                   <p className="text-red-500 text-xs mt-1">{errors.prevWage}</p>
@@ -536,9 +800,7 @@ export default function Home() {
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
                     placeholder="例: 510"
                   />
-                  <span className="text-sm text-gray-500 whitespace-nowrap">
-                    万円
-                  </span>
+                  <span className="text-sm text-gray-500 whitespace-nowrap">万円</span>
                 </div>
                 {errors.currWage && (
                   <p className="text-red-500 text-xs mt-1">{errors.currWage}</p>
@@ -569,12 +831,12 @@ export default function Home() {
                   )}
                   {wageInfo.tier === "half" && (
                     <span className="text-blue-600 ml-2 text-xs">
-                      → 1/2 × 3年の特例見込み
+                      → 1/2 x 3年の特例見込み
                     </span>
                   )}
                   {wageInfo.tier === "quarter" && (
                     <span className="text-green-600 ml-2 text-xs">
-                      → 1/4 × 5年の最大特例見込み
+                      → 1/4 x 5年の最大特例見込み
                     </span>
                   )}
                 </div>
@@ -611,9 +873,7 @@ export default function Home() {
                   className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
                   placeholder="わからなければ空欄でOK"
                 />
-                <span className="text-sm text-gray-500 whitespace-nowrap">
-                  万円
-                </span>
+                <span className="text-sm text-gray-500 whitespace-nowrap">万円</span>
               </div>
               {errors.currentStandardAmount && (
                 <p className="text-red-500 text-xs mt-1">
@@ -630,132 +890,39 @@ export default function Home() {
           </section>
 
           {/* ③ 今回の設備投資 */}
-          <section className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-            <h2 className="text-base font-semibold text-gray-700 mb-4 flex items-center gap-1">
+          <section className="space-y-3">
+            <h2 className="text-base font-semibold text-gray-700 flex items-center gap-1">
               <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center font-bold shrink-0">
                 ③
               </span>
               <span>今回の設備投資</span>
-              <Tooltip text="購入を検討している設備について入力してください。金額は税抜の購入価格（見積書の金額）です" />
+              <Tooltip text="購入を検討している設備について入力してください。複数ある場合は「設備を追加」ボタンで追加できます" />
             </h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  設備の種類
-                </label>
-                <select
-                  value={form.equipmentType}
-                  onChange={(e) => {
-                    const eqType = e.target.value as EquipmentType;
-                    const cats = ASSET_CATEGORIES[eqType];
-                    setForm((f) => ({
-                      ...f,
-                      equipmentType: eqType,
-                      assetCategory: "0",
-                      usefulLife: String(cats[0].usefulLife),
-                    }));
-                  }}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
-                >
-                  {(
-                    Object.entries(EQUIPMENT_LABELS) as [EquipmentType, string][]
-                  ).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v}（{MIN_COSTS[k]}万円以上）
-                    </option>
-                  ))}
-                </select>
-              </div>
 
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  具体的な資産の種類
-                  <Tooltip text="該当する資産を選ぶと耐用年数が自動設定されます。一覧にない場合は「その他（手動入力）」を選んでください" />
-                </label>
-                <select
-                  value={form.assetCategory}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === "custom") {
-                      setForm((f) => ({ ...f, assetCategory: "custom" }));
-                    } else {
-                      const cats = ASSET_CATEGORIES[form.equipmentType];
-                      const cat = cats[parseInt(val)];
-                      setForm((f) => ({
-                        ...f,
-                        assetCategory: val,
-                        usefulLife: String(cat.usefulLife),
-                      }));
-                    }
-                  }}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
-                >
-                  {ASSET_CATEGORIES[form.equipmentType].map((cat, i) => (
-                    <option key={i} value={String(i)}>
-                      {cat.label}（{cat.usefulLife}年）
-                    </option>
-                  ))}
-                  <option value="custom">その他（手動入力）</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  購入金額（税抜）
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.1"
-                    inputMode="decimal"
-                    value={form.acquisitionCost}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        acquisitionCost: e.target.value,
-                      }))
-                    }
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 text-right text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                    placeholder={`例: ${MIN_COSTS[form.equipmentType]}`}
-                  />
-                  <span className="text-sm text-gray-500 whitespace-nowrap">
-                    万円
-                  </span>
-                </div>
-                {errors.acquisitionCost && (
-                  <p className="text-red-500 text-xs mt-1">
-                    {errors.acquisitionCost}
+            {form.equipment.map((entry, i) => (
+              <div key={entry.id}>
+                <EquipmentRow
+                  entry={entry}
+                  index={i}
+                  total={form.equipment.length}
+                  onChange={(updated) => updateEquipment(i, updated)}
+                  onRemove={() => removeEquipment(i)}
+                />
+                {errors[`equipment_${i}_cost`] && (
+                  <p className="text-red-500 text-xs mt-1 ml-2">
+                    設備{form.equipment.length > 1 ? ` ${i + 1}` : ""}: {errors[`equipment_${i}_cost`]}
                   </p>
                 )}
-                <p className="text-xs text-gray-400 mt-1">
-                  ※ 設置費・運搬費を含む金額です（見積書や契約書の金額）
-                </p>
               </div>
+            ))}
 
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  耐用年数
-                  {form.assetCategory !== "custom" && (
-                    <span className="text-xs text-green-600 ml-2">（自動設定済み）</span>
-                  )}
-                </label>
-                <select
-                  value={form.usefulLife}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, usefulLife: e.target.value }))
-                  }
-                  disabled={form.assetCategory !== "custom"}
-                  className={`w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white ${form.assetCategory !== "custom" ? "bg-gray-50 text-gray-500" : ""}`}
-                >
-                  {USEFUL_LIFE_OPTIONS.map((y) => (
-                    <option key={y} value={y}>
-                      {y}年
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={addEquipment}
+              className="w-full border-2 border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-600 font-medium py-3 rounded-xl text-sm transition-colors"
+            >
+              + 設備を追加
+            </button>
           </section>
 
           <button
